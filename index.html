@@ -1,0 +1,319 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lluvia Estelar</title>
+<style>
+  :root {
+    --bg: #0b1020;
+    --panel: #151c33;
+    --text: #e8ecff;
+    --muted: #9aa4c7;
+    --accent: #ffd34d;
+    --danger: #ff5c7a;
+    --ship: #5cd6ff;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 16px;
+  }
+  h1 { margin: 8px 0 4px; font-size: clamp(1.5rem, 5vw, 2.2rem); letter-spacing: .04em; }
+  p.sub { margin: 0 0 12px; color: var(--muted); text-align: center; }
+  .hud {
+    width: 100%; max-width: 480px;
+    display: flex; justify-content: space-between;
+    background: var(--panel); border-radius: 10px;
+    padding: 8px 14px; margin-bottom: 8px; font-weight: 600;
+  }
+  .hud span b { color: var(--accent); }
+  .wrap { position: relative; width: 100%; max-width: 480px; }
+  canvas {
+    display: block; width: 100%; aspect-ratio: 3 / 4;
+    background: radial-gradient(ellipse at top, #1b2550, #060914);
+    border-radius: 12px; touch-action: none;
+  }
+  .overlay {
+    position: absolute; inset: 0;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    background: rgba(6, 9, 20, .78); border-radius: 12px; text-align: center; padding: 20px;
+  }
+  .overlay.hidden { display: none; }
+  .overlay h2 { margin: 0 0 8px; font-size: 1.8rem; }
+  .overlay p { margin: 4px 0; color: var(--muted); }
+  button {
+    margin-top: 16px; font: inherit; font-weight: 700; font-size: 1.1rem;
+    padding: 12px 28px; border: 0; border-radius: 999px; cursor: pointer;
+    background: var(--accent); color: #1a1400;
+  }
+  button:hover { filter: brightness(1.08); }
+  .help { max-width: 480px; color: var(--muted); font-size: .9rem; margin-top: 12px; text-align: center; }
+  kbd { background: var(--panel); padding: 2px 6px; border-radius: 4px; color: var(--text); }
+</style>
+</head>
+<body>
+  <h1>⭐ Lluvia Estelar</h1>
+  <p class="sub">Atrapa las estrellas y esquiva los meteoritos.</p>
+
+  <div class="hud">
+    <span>Puntos: <b id="score">0</b></span>
+    <span>Vidas: <b id="lives">❤❤❤</b></span>
+    <span>Récord: <b id="best">0</b></span>
+  </div>
+
+  <div class="wrap">
+    <canvas id="game" width="480" height="640"></canvas>
+    <div class="overlay" id="overlay">
+      <h2 id="ovTitle">¿Listo?</h2>
+      <p id="ovText">Mueve la nave para recoger ⭐ y evitar ☄️.</p>
+      <button id="startBtn">Jugar</button>
+    </div>
+  </div>
+
+  <p class="help">
+    Controles: <kbd>←</kbd> <kbd>→</kbd> o <kbd>A</kbd> <kbd>D</kbd> para moverte,
+    <kbd>P</kbd> para pausar. En móvil, arrastra el dedo sobre el juego.
+  </p>
+
+<script>
+(() => {
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+
+  const $score = document.getElementById('score');
+  const $lives = document.getElementById('lives');
+  const $best = document.getElementById('best');
+  const $overlay = document.getElementById('overlay');
+  const $ovTitle = document.getElementById('ovTitle');
+  const $ovText = document.getElementById('ovText');
+  const $btn = document.getElementById('startBtn');
+
+  let best = 0;
+  try { best = +localStorage.getItem('lluvia-best') || 0; } catch (e) {}
+  $best.textContent = best;
+
+  // Fondo de estrellas decorativas
+  const bgStars = Array.from({ length: 70 }, () => ({
+    x: Math.random() * W, y: Math.random() * H,
+    r: Math.random() * 1.5 + .3, s: Math.random() * 30 + 10
+  }));
+
+  const keys = {};
+  let pointerX = null;
+  let state = 'menu'; // menu | playing | paused | over
+  let player, items, particles, score, lives, spawnTimer, elapsed, invuln, last;
+
+  function reset() {
+    player = { x: W / 2, y: H - 60, w: 44, h: 36, speed: 360 };
+    items = []; particles = [];
+    score = 0; lives = 3; spawnTimer = 0; elapsed = 0; invuln = 0;
+    updateHud();
+  }
+
+  function updateHud() {
+    $score.textContent = score;
+    $lives.textContent = lives > 0 ? '❤'.repeat(lives) : '—';
+    $best.textContent = best;
+  }
+
+  function difficulty() { return 1 + elapsed / 25; }
+
+  function spawn() {
+    const isStar = Math.random() < 0.45;
+    const r = isStar ? 14 : 12 + Math.random() * 14;
+    items.push({
+      type: isStar ? 'star' : 'rock',
+      x: r + Math.random() * (W - 2 * r), y: -r, r,
+      vy: (120 + Math.random() * 90) * difficulty(),
+      vx: isStar ? 0 : (Math.random() - .5) * 60,
+      rot: Math.random() * Math.PI, vr: (Math.random() - .5) * 3
+    });
+  }
+
+  function burst(x, y, color, n = 14) {
+    for (let i = 0; i < n; i++) {
+      const a = Math.random() * Math.PI * 2, s = 60 + Math.random() * 160;
+      particles.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, life: .6, color });
+    }
+  }
+
+  function hit(it) {
+    const px = Math.max(player.x - player.w / 2, Math.min(it.x, player.x + player.w / 2));
+    const py = Math.max(player.y - player.h / 2, Math.min(it.y, player.y + player.h / 2));
+    return (it.x - px) ** 2 + (it.y - py) ** 2 < (it.r * .85) ** 2;
+  }
+
+  function update(dt) {
+    elapsed += dt;
+    for (const s of bgStars) { s.y += s.s * dt; if (s.y > H) { s.y = 0; s.x = Math.random() * W; } }
+
+    // Movimiento
+    let dir = 0;
+    if (keys.ArrowLeft || keys.a || keys.A) dir -= 1;
+    if (keys.ArrowRight || keys.d || keys.D) dir += 1;
+    if (dir) player.x += dir * player.speed * dt;
+    else if (pointerX !== null) {
+      const diff = pointerX - player.x;
+      player.x += Math.sign(diff) * Math.min(Math.abs(diff), player.speed * 1.4 * dt);
+    }
+    player.x = Math.max(player.w / 2, Math.min(W - player.w / 2, player.x));
+    if (invuln > 0) invuln -= dt;
+
+    // Generación
+    spawnTimer -= dt;
+    if (spawnTimer <= 0) { spawn(); spawnTimer = Math.max(.22, .8 / difficulty()); }
+
+    // Objetos
+    for (let i = items.length - 1; i >= 0; i--) {
+      const it = items[i];
+      it.y += it.vy * dt; it.x += it.vx * dt; it.rot += it.vr * dt;
+      if (it.x < it.r || it.x > W - it.r) it.vx *= -1;
+
+      if (hit(it)) {
+        if (it.type === 'star') {
+          score += 10; burst(it.x, it.y, '#ffd34d');
+        } else if (invuln <= 0) {
+          lives--; invuln = 1.5; burst(it.x, it.y, '#ff5c7a', 24);
+          if (lives <= 0) { items.splice(i, 1); updateHud(); return gameOver(); }
+        }
+        items.splice(i, 1); updateHud(); continue;
+      }
+      if (it.y - it.r > H) items.splice(i, 1);
+    }
+
+    for (let i = particles.length - 1; i >= 0; i--) {
+      const p = particles[i];
+      p.x += p.vx * dt; p.y += p.vy * dt; p.life -= dt;
+      if (p.life <= 0) particles.splice(i, 1);
+    }
+  }
+
+  function drawStar(x, y, r, rot) {
+    ctx.save(); ctx.translate(x, y); ctx.rotate(rot);
+    ctx.beginPath();
+    for (let i = 0; i < 10; i++) {
+      const rad = i % 2 ? r * .45 : r, a = i * Math.PI / 5 - Math.PI / 2;
+      ctx.lineTo(Math.cos(a) * rad, Math.sin(a) * rad);
+    }
+    ctx.closePath();
+    ctx.fillStyle = '#ffd34d'; ctx.shadowColor = '#ffd34d'; ctx.shadowBlur = 14;
+    ctx.fill(); ctx.restore();
+  }
+
+  function drawRock(it) {
+    ctx.save(); ctx.translate(it.x, it.y); ctx.rotate(it.rot);
+    ctx.beginPath();
+    for (let i = 0; i < 8; i++) {
+      const a = i * Math.PI / 4, rad = it.r * (i % 2 ? .8 : 1);
+      ctx.lineTo(Math.cos(a) * rad, Math.sin(a) * rad);
+    }
+    ctx.closePath();
+    ctx.fillStyle = '#8a6a5c'; ctx.fill();
+    ctx.strokeStyle = '#ff5c7a'; ctx.lineWidth = 2; ctx.stroke();
+    ctx.restore();
+  }
+
+  function drawPlayer() {
+    if (invuln > 0 && Math.floor(invuln * 10) % 2) return;
+    const { x, y, w, h } = player;
+    ctx.save();
+    // Llama
+    ctx.fillStyle = '#ff9d3d';
+    ctx.beginPath();
+    ctx.moveTo(x - 8, y + h / 2); ctx.lineTo(x + 8, y + h / 2);
+    ctx.lineTo(x, y + h / 2 + 10 + Math.random() * 8); ctx.closePath(); ctx.fill();
+    // Nave
+    ctx.fillStyle = '#5cd6ff'; ctx.shadowColor = '#5cd6ff'; ctx.shadowBlur = 12;
+    ctx.beginPath();
+    ctx.moveTo(x, y - h / 2); ctx.lineTo(x + w / 2, y + h / 2);
+    ctx.lineTo(x, y + h / 4); ctx.lineTo(x - w / 2, y + h / 2);
+    ctx.closePath(); ctx.fill();
+    ctx.restore();
+  }
+
+  function draw() {
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = '#ffffff';
+    for (const s of bgStars) { ctx.globalAlpha = .5; ctx.fillRect(s.x, s.y, s.r, s.r); }
+    ctx.globalAlpha = 1;
+
+    if (!player) return;
+    for (const it of items) it.type === 'star' ? drawStar(it.x, it.y, it.r, it.rot) : drawRock(it);
+    for (const p of particles) {
+      ctx.globalAlpha = Math.max(0, p.life / .6);
+      ctx.fillStyle = p.color; ctx.fillRect(p.x - 2, p.y - 2, 4, 4);
+    }
+    ctx.globalAlpha = 1;
+    drawPlayer();
+
+    ctx.fillStyle = 'rgba(232,236,255,.6)';
+    ctx.font = '600 14px system-ui, sans-serif';
+    ctx.fillText('Nivel ' + Math.floor(difficulty()), 12, 24);
+  }
+
+  function loop(t) {
+    const dt = Math.min(.05, (t - last) / 1000 || 0);
+    last = t;
+    if (state === 'playing') update(dt);
+    draw();
+    requestAnimationFrame(loop);
+  }
+
+  function showOverlay(title, text, btn) {
+    $ovTitle.textContent = title; $ovText.innerHTML = text; $btn.textContent = btn;
+    $overlay.classList.remove('hidden');
+  }
+
+  function start() {
+    reset(); state = 'playing';
+    $overlay.classList.add('hidden');
+  }
+
+  function gameOver() {
+    state = 'over';
+    const record = score > best;
+    if (record) { best = score; try { localStorage.setItem('lluvia-best', best); } catch (e) {} }
+    updateHud();
+    showOverlay('¡Fin del juego!',
+      `Puntuación: <b>${score}</b>${record ? '<br>🏆 ¡Nuevo récord!' : ''}`, 'Jugar otra vez');
+  }
+
+  function togglePause() {
+    if (state === 'playing') { state = 'paused'; showOverlay('Pausa', 'Pulsa P o el botón para continuar.', 'Continuar'); }
+    else if (state === 'paused') { state = 'playing'; $overlay.classList.add('hidden'); }
+  }
+
+  $btn.addEventListener('click', () => state === 'paused' ? togglePause() : start());
+
+  addEventListener('keydown', e => {
+    keys[e.key] = true;
+    if (e.key === 'p' || e.key === 'P') togglePause();
+    if ((e.key === 'Enter' || e.key === ' ') && (state === 'menu' || state === 'over')) { e.preventDefault(); start(); }
+    if (e.key.startsWith('Arrow')) e.preventDefault();
+  });
+  addEventListener('keyup', e => { keys[e.key] = false; });
+
+  function setPointer(e) {
+    const rect = canvas.getBoundingClientRect();
+    pointerX = (e.clientX - rect.left) * (W / rect.width);
+  }
+  canvas.addEventListener('pointerdown', e => { setPointer(e); canvas.setPointerCapture(e.pointerId); });
+  canvas.addEventListener('pointermove', e => { if (e.buttons || e.pointerType === 'touch') setPointer(e); });
+  canvas.addEventListener('pointerup', () => { pointerX = null; });
+  canvas.addEventListener('pointercancel', () => { pointerX = null; });
+
+  document.addEventListener('visibilitychange', () => { if (document.hidden && state === 'playing') togglePause(); });
+
+  requestAnimationFrame(t => { last = t; loop(t); });
+})();
+</script>
+</body>
+</html>
